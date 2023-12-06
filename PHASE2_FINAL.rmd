@@ -1,0 +1,390 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+# Final Phase 2
+## Tanner Nelson
+## BAN-502
+
+
+Load all the packages i used during the modeling process
+```{r, include = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(mice) #package for imputation
+library(VIM) #visualizing missingness
+library(ranger) #for random forests
+library(randomForest) #also for random forests
+library(caret)
+library(skimr)
+library(GGally)
+library(gridExtra)
+library(vip) 
+library(RColorBrewer)
+library(rpart)
+library(rattle)
+library(e1071)
+library(xgboost)
+library(usemodels)
+library(nnet) #our neural network package
+library(NeuralNetTools)
+```
+
+Load data from the excel file  
+```{r}
+randForest = read_csv("ames_student-1.csv")
+```
+
+Structure and summary
+```{R}
+#str(randForest)
+#summary(randForest)
+```
+
+Convert all character variables to factors  
+```{r}
+randForest = randForest %>% mutate_if(is.character,as_factor)
+# Determined using all variables will result in high accuracy from trial and error
+```
+
+Check for missing data 
+```{r}
+#skim(randForest)
+```
+
+Split the data into training and test sets.  
+```{r}
+set.seed(123) 
+randForest_split = initial_split(randForest, prop = 0.7, strata = Above_Median) #attempted .6 to optimize speed 
+train_rf = training(randForest_split)
+test_rf = testing(randForest_split)
+```
+
+Set up our folds for cross-validation  
+```{r}
+set.seed(123)
+rf_folds = vfold_cv(train_rf, v = 10) # tried 5 and 3 and found 10 to be the best
+```
+
+Random forest with tuning grid
+```{r}
+randForest_recipe = recipe(Above_Median ~., train_rf) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% #add tuning of mtry and min_n parameters
+  #setting trees to 100 to speed up the model
+  set_engine("ranger", importance = "permutation") %>% #added importance metric
+  set_mode("classification") 
+
+randForest_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(randForest_recipe)
+
+set.seed(123)
+rf_res = tune_grid(
+  randForest_wflow,
+  resamples = rf_folds,
+  grid = 20 #tried 20 different combinations
+)
+```
+
+
+```{r}
+rf_res %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  dplyr::select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+Refining the parameters  
+```{r}
+randForest_recipe = recipe(Above_Median ~., train_rf) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% #add tuning of mtry and min_n parameters
+  #setting trees to 100 here should also speed things up a bit, but more trees might be better
+  set_engine("ranger", importance = "permutation") %>% #added importance metric
+  set_mode("classification")
+
+randForest_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(randForest_recipe)
+
+rf_grid = grid_regular(
+  mtry(range = c(3, 10)), #these values determined through significant trial and error
+  min_n(range = c(20, 70)), #these values determined through significant trial and error
+  levels = 5
+)
+
+set.seed(123)
+rf_res_tuned = tune_grid(
+  randForest_wflow,
+  resamples = rf_folds,
+  grid = rf_grid #use the tuning grid
+)
+```
+
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  dplyr::select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+An alternate view of the parameters  
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+```{r}
+best_rf = select_best(rf_res_tuned, "accuracy")
+
+final_rf = finalize_workflow(
+  randForest_wflow,
+  best_rf
+)
+
+final_rf
+```
+
+```{r}
+#fit the finalized workflow to our training data
+final_rf_fit = fit(final_rf, train_rf)
+```
+
+View variable importance
+```{r}
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+Predictions  
+```{r}
+train_rfpredrf = predict(final_rf_fit, train_rf)
+head(train_rfpredrf)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(train_rfpredrf$.pred_class, train_rf$Above_Median, 
+                positive = "Yes")
+```
+
+Predictions on test
+```{r}
+testpredrf = predict(final_rf_fit, test_rf)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, test_rf$Above_Median, 
+                positive = "Yes")
+```
+
+## Next Module
+
+# XGBoost 
+
+```{r}
+xgbMod = read_csv("ames_student-1.csv")
+```
+
+Data cleaning and preparation (as done before).  
+```{r}
+xgbMod = xgbMod %>% mutate_if(is.character,as_factor)
+```
+
+Now we'll split the data.   
+```{r}
+set.seed(123) 
+xgbMod_split = initial_split(xgbMod, prop = 0.7, strata = Above_Median) #70% in training
+train_xgb = training(xgbMod_split)
+test_xgb = testing(xgbMod_split)
+```
+
+```{r}
+#use_xgboost(Above_Median ~., train_xgb) 
+```
+  
+```{r}
+set.seed(123)
+folds = vfold_cv(train_xgb, v = 4)
+```
+
+```{r}
+xgboost_recipe <- 
+  recipe(formula = Above_Median ~ ., data = train_xgb) %>% 
+  #step_other(train_xgb$Neighborhood, threshold = 0.01) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) 
+
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), # using tune to optimize parameters
+    loss_reduction = tune(), sample_size = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+set.seed(99786)
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = folds, grid = 25)
+```
+
+```{R}
+best_xgb = select_best(xgboost_tune, "accuracy") # select the best model based on accuracy
+
+final_xgb = finalize_workflow(
+  xgboost_workflow,
+  best_xgb
+)
+
+final_xgb_fit = fit(final_xgb, train_xgb)
+```
+
+```{r}
+predxgbtrain = predict(final_xgb_fit, train_xgb)
+confusionMatrix(train_xgb$Above_Median, predxgbtrain$.pred_class, positive="Yes")
+```
+
+```{r}
+predxgbtest = predict(final_xgb_fit, test_xgb)
+confusionMatrix(test_xgb$Above_Median, predxgbtest$.pred_class, positive="Yes")
+```
+
+
+```{r}
+final_xgb_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+## Next Module
+
+# Neural Network Module
+
+
+```{r}
+nnMod = read_csv("ames_student-1.csv")
+```
+
+Data cleaning and preparation (as done before).  
+```{r}
+nnMod = nnMod %>% mutate_if(is.character,as_factor)
+```
+
+```{r}
+set.seed(123) 
+nnMod_split = initial_split(nnMod, prop = 0.7, strata = Above_Median) #70% in training
+train_nn = training(nnMod_split)
+test_nn = testing(nnMod_split)
+```
+
+```{r}
+set.seed(123)
+folds = vfold_cv(train_nn, v = 5)
+```
+
+```{r}
+mice(data = train_nn, MaxNWts = 5000) # Increases size of networks to be processed
+
+nnMod_recipe = recipe(Above_Median ~., train_nn) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>% #normalize the numeric predictors
+  step_dummy(all_nominal(), -all_outcomes())
+
+nnMod_model = 
+  mlp(hidden_units = tune(), penalty = tune(), 
+      epochs = tune()) %>%
+  set_mode("classification") %>% 
+  set_engine("nnet", verbose = 0) # reduces output from the model
+  
+nnMod_workflow <- 
+  workflow() %>% 
+  add_recipe(nnMod_recipe) %>% 
+  add_model(nnMod_model) 
+
+set.seed(1234)
+neural_tune <-
+  tune_grid(nnMod_workflow, resamples = folds, grid = 25)
+
+# WIll recieve an error however the model is still built
+
+```
+
+```{r}
+neural_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  dplyr::select(mean, hidden_units, penalty, epochs) %>%
+  pivot_longer(hidden_units:epochs,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+```{r}
+best_nn = select_best(neural_tune, "accuracy")
+final_nn = finalize_workflow(
+  nnMod_workflow,
+  best_nn)
+
+final_nn
+```
+
+```{r}
+final_nn_fit = fit(final_nn, train_nn)
+```
+
+```{r}
+trainprednn = predict(final_nn_fit, train_nn)
+head(trainprednn)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(trainprednn$.pred_class, train_nn$Above_Median, 
+                positive = "Yes")
+```
+
+```{r}
+testprednn = predict(final_nn_fit, test_nn) # originally had more tuning however only decreased accuracy of model
+head(testprednn)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(testprednn$.pred_class, test_nn$Above_Median, 
+                positive = "Yes")
+```
+
+
+```{r}
+final_nn_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+Created other models that did not compare (accuracy score of roughly 85%) so did not include
